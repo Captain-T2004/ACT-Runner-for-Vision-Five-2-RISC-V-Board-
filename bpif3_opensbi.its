@@ -10,7 +10,7 @@
       data = /incbin/("firmware_act.bin");
       type = "firmware";
       arch = "riscv";
-      os = "u-boot";
+      os = "opensbi";
       compression = "none";
       load = <0xC0000000>;
       entry = <0xC0000000>;
