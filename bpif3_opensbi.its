@@ -15,7 +15,7 @@
       load = <0xC0000000>;
       entry = <0xC0000000>;
       hash-1 {
-        algo = "sha256";
+        algo = "crc32";
       };
     };
   };
