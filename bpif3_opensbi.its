@@ -2,18 +2,18 @@
 
 / {
   description = "ACT4 runner firmware for BPI-F3 (SpacemiT K1), replaces the opensbi FIT slot";
-  #address-cells = <1>;
+  #address-cells = <2>;
 
   images {
-    firmware {
+    opensbi {
       description = "bpif3-act4-runner";
       data = /incbin/("firmware_act.bin");
       type = "firmware";
       arch = "riscv";
       os = "opensbi";
       compression = "none";
-      load = <0xC0000000>;
-      entry = <0xC0000000>;
+      load = <0x00 0x00>;
+      entry = <0x00 0x00>;
       hash-1 {
         algo = "crc32";
       };
@@ -21,10 +21,10 @@
   };
 
   configurations {
-    default = "config-1";
-    config-1 {
+    default = "config_1";
+    config_1 {
       description = "ACT4 runner config";
-      firmware = "firmware";
+      firmware = "opensbi";
     };
   };
 };
