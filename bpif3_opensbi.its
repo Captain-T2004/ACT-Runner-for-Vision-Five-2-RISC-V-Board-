@@ -12,8 +12,8 @@
       arch = "riscv";
       os = "opensbi";
       compression = "none";
-      load = <0x00 0x00>;
-      entry = <0x00 0x00>;
+      load = <0x00 0x04000000>;
+      entry = <0x00 0x04000000>;
       hash-1 {
         algo = "crc32";
       };
