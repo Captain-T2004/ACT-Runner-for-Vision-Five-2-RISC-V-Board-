@@ -849,6 +849,22 @@ int run_pack_external(uint64_t *total, uint64_t *pass, uint64_t *fail)
                     continue;
                 }
 
+                {
+                    const uint8_t *dbg_blob = (const uint8_t *)(uintptr_t)(EXT_PACK_ADDR + first_block_off);
+                    uart_puts("[DBG] entry offset="); uart_put_hex(e->offset);
+                    uart_puts(" size="); uart_put_hex(e->size);
+                    uart_puts(" first_block="); uart_put_hex((uint64_t)first_block);
+                    uart_puts(" first_block_off="); uart_put_hex((uint64_t)first_block_off);
+                    uart_puts(" num_blocks="); uart_put_hex((uint64_t)num_blocks);
+                    uart_puts("\n[DBG] blob bytes=");
+                    for (int db = 0; db < 64; db++) {
+                        uint8_t byte = dbg_blob[db];
+                        uart_putc("0123456789abcdef"[(byte >> 4) & 0xf]);
+                        uart_putc("0123456789abcdef"[byte & 0xf]);
+                    }
+                    uart_puts("\n");
+                }
+
                 (void)run_one_blob(name, (const uint8_t *)(uintptr_t)(EXT_PACK_ADDR + first_block_off), (size_t)e->size, &tr);
                 *total += 1;
                 if (case_is_pass(&tr)) *pass += 1;
