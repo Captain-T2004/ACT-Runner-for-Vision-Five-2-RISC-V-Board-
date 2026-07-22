@@ -250,15 +250,28 @@ static uint32_t k1_extract_bits_128(const uint32_t r[4], uint32_t msb, uint32_t 
 
 static int k1_read_csd(uint32_t csd[4])
 {
+    uint32_t raw[4];
     int rc = k1_send_command(MMC_CMD_SEND_CSD, g_k1_sd_rca << 16,
                              K1_RSP_R2, 0, 0, 0);
     if (rc != 0) return rc;
 
     /* SDHCI response registers are ordered from least to most significant. */
-    csd[0] = k1_readl(SDHCI_RESPONSE + 0u);
-    csd[1] = k1_readl(SDHCI_RESPONSE + 4u);
-    csd[2] = k1_readl(SDHCI_RESPONSE + 8u);
-    csd[3] = k1_readl(SDHCI_RESPONSE + 12u);
+    raw[0] = k1_readl(SDHCI_RESPONSE + 0u);
+    raw[1] = k1_readl(SDHCI_RESPONSE + 4u);
+    raw[2] = k1_readl(SDHCI_RESPONSE + 8u);
+    raw[3] = k1_readl(SDHCI_RESPONSE + 12u);
+
+    /*
+     * For R2 (136-bit) responses the controller strips the leading start
+     * bit/transmission bit/command byte before storing it in the response
+     * registers, so the raw value is the true CSD shifted right by 8 bits.
+     * Reconstruct the real 128-bit CSD by shifting left 8 and pulling in
+     * the top byte of the next-lower word (standard SDHCI R2 handling).
+     */
+    csd[3] = (raw[3] << 8) | (raw[2] >> 24);
+    csd[2] = (raw[2] << 8) | (raw[1] >> 24);
+    csd[1] = (raw[1] << 8) | (raw[0] >> 24);
+    csd[0] = (raw[0] << 8);
     return 0;
 }
 
