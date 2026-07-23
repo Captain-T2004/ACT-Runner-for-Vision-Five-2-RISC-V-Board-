@@ -631,6 +631,29 @@ int load_pack_from_sd_tail(void)
     uint32_t footer_next_index = 0;
     uint32_t footer_inflight_index = FOOTER_IDX_NONE;
     uint32_t footer_retry_count = 0u;
+
+    {
+        extern uint8_t __text_start[];
+        extern uint8_t __stack_top[];
+        uint64_t fw_load_addr = (uint64_t)(uintptr_t)__text_start;
+        uint64_t candidate_addr = (uint64_t)(uintptr_t)__stack_top + 0x100000ULL;
+        volatile uint32_t *p1 = (volatile uint32_t *)(uintptr_t)EXT_PACK_ADDR;
+        volatile uint32_t *p2 = (volatile uint32_t *)(uintptr_t)candidate_addr;
+
+        uart_puts("[DBG] FW_LOAD_ADDR="); uart_put_hex(fw_load_addr);
+        uart_puts(" EXT_PACK_ADDR="); uart_put_hex(EXT_PACK_ADDR);
+        uart_puts(" candidate="); uart_put_hex(candidate_addr);
+        uart_puts("\n");
+
+        *p1 = 0xdeadbeefu;
+        uart_puts("[DBG] poke EXT_PACK_ADDR readback="); uart_put_hex(*p1);
+        uart_puts(" (expect deadbeef)\n");
+
+        *p2 = 0xcafef00du;
+        uart_puts("[DBG] poke candidate readback="); uart_put_hex(*p2);
+        uart_puts(" (expect cafef00d)\n");
+    }
+
     sd_backend_reset_state(SDIO1_BASE);
     uart_puts("[SD] probing base="); uart_put_hex((uint64_t)g_sdio_base); uart_puts("\n");
     g_ext_pack_loaded = 0;
@@ -724,6 +747,18 @@ int load_pack_from_sd_tail(void)
     }
 
     uart_puts("[SD] table_count="); uart_put_dec_u64(g_ext_pack_count); uart_puts("\n");
+
+    {
+        uint32_t *ext_words = (uint32_t *)(uintptr_t)EXT_PACK_ADDR;
+        int dbg_sd_rc;
+        memset_local(ext_words, 0xaa, SD_BLOCK_SIZE);
+        dbg_sd_rc = sd_read_block_words((uint32_t)g_ext_pack_start_lba, ext_words);
+        uart_puts("[DBG] sentinel-fill+SD-read EXT_PACK_ADDR lba="); uart_put_hex(g_ext_pack_start_lba);
+        uart_puts(" rc="); uart_put_hex((uint64_t)(int64_t)dbg_sd_rc);
+        uart_puts(" first_word="); uart_put_hex(ext_words[0]);
+        uart_puts(" (expect_magic="); uart_put_hex(PACK_MAGIC);
+        uart_puts(", still_sentinel_if=aaaaaaaa)\n");
+    }
 
     if (g_ext_inflight_index != FOOTER_IDX_NONE && g_ext_inflight_index < g_ext_pack_count) {
         if (g_ext_recovery_retry_count >= FOOTER_MAX_TEST_RETRIES) {
