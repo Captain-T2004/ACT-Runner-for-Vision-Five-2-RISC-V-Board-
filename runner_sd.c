@@ -792,6 +792,15 @@ int run_pack_external(uint64_t *total, uint64_t *pass, uint64_t *fail)
             uart_puts(" retry_count="); uart_put_dec_u64(attempt_count);
             uart_puts(" rc="); uart_put_hex((uint64_t)(int64_t)prc); uart_puts("\n");
 
+            {
+                uint32_t dbg_reread_scratch[SD_BLOCK_SIZE / sizeof(uint32_t)];
+                int dbg_rc = sd_read_block_words((uint32_t)g_ext_pack_start_lba, dbg_reread_scratch);
+                uart_puts("[DBG] re-read header lba="); uart_put_hex(g_ext_pack_start_lba);
+                uart_puts(" rc="); uart_put_hex((uint64_t)(int64_t)dbg_rc);
+                uart_puts(" first_word="); uart_put_hex(dbg_reread_scratch[0]);
+                uart_puts(" (expect_magic="); uart_put_hex(PACK_MAGIC); uart_puts(")\n");
+            }
+
             if (e->offset > pack_size || e->size > pack_size || (e->offset + e->size) > pack_size || (e->offset + e->size) < e->offset) {
                 uart_puts("[CASE] RESULT name="); uart_puts(name);
                 uart_puts(" status=ERROR reason=bad_external_range\n");
