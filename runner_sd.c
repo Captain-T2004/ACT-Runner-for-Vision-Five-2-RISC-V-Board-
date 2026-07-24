@@ -1,5 +1,7 @@
 #include "runner_shared.h"
+#include "runner_sd_sdhci_k1.h"
 
+#if RUNNER_SD_BACKEND == RUNNER_SD_BACKEND_DWMCI
 #define DWMCI_CTRL      0x000
 #define DWMCI_PWREN     0x004
 #define DWMCI_CLKDIV    0x008
@@ -90,6 +92,7 @@
 #define MMC_RSP_R3      (MMC_RSP_PRESENT)
 #define MMC_RSP_R6      (MMC_RSP_PRESENT | MMC_RSP_CRC | MMC_RSP_OPCODE)
 #define MMC_RSP_R7      (MMC_RSP_PRESENT | MMC_RSP_CRC | MMC_RSP_OPCODE)
+#endif
 
 #define FOOTER_LEGACY_IDX16_MASK 0x0000ffffu
 #define FOOTER_IDX_MASK          0x000003ffu
@@ -111,17 +114,20 @@ uint32_t g_ext_progress_persisted = 0u;
 static uint32_t g_ext_recovery_retry_count = 0u;
 int g_ext_pack_loaded = 0;
 
+#if RUNNER_SD_BACKEND == RUNNER_SD_BACKEND_DWMCI
 static uint32_t g_sd_rca = 0;
 static uint8_t g_sd_high_capacity = 0;
+#endif
 static uint32_t g_sd_total_blocks = 0;
 static uint32_t g_sd_tmp_block[SD_BLOCK_SIZE / sizeof(uint32_t)];
 static uintptr_t g_sdio_base = SDIO1_BASE;
 static uint64_t g_ext_pack_start_lba = 0;
 static uint32_t g_ext_pack_num_blocks = 0;
-static uint32_t g_ext_pack_count = 0;
+uint32_t g_ext_pack_count = 0;
 static ActPackEntry g_ext_entries[MAX_PACK_TESTS];
 static uint8_t g_ext_table_buf[sizeof(ActPackHeader) + (MAX_PACK_TESTS * sizeof(ActPackEntry))];
 
+#if RUNNER_SD_BACKEND == RUNNER_SD_BACKEND_DWMCI
 static inline uint32_t dw_readl(uint32_t reg)
 {
     return mmio_read32(g_sdio_base + reg);
@@ -473,6 +479,80 @@ static int sd_card_attach_from_spl(void)
     return 0;
 }
 
+static void sd_backend_reset_state(uintptr_t base)
+{
+    g_sdio_base = base;
+    g_sd_rca = 0;
+    g_sd_high_capacity = 0;
+    g_sd_total_blocks = 0;
+}
+
+static void sd_backend_quiesce(void)
+{
+    int busy_rc;
+    int idle_rc;
+    int clk_rc;
+
+    if (g_sdio_base == 0) return;
+    busy_rc = dw_wait_not_busy();
+    idle_rc = sd_send_cmd(MMC_CMD_GO_IDLE_STATE, 0, MMC_RSP_NONE, 0);
+    clk_rc = dw_update_clock(0);
+    dw_writel(DWMCI_INTMASK, 0);
+    dw_writel(DWMCI_RINTSTS, DWMCI_INTMSK_ALL);
+    dw_writel(DWMCI_PWREN, 0);
+
+    uart_puts("[SD] quiesce busy_rc=");
+    uart_put_hex((uint64_t)(int64_t)busy_rc);
+    uart_puts(" idle_rc=");
+    uart_put_hex((uint64_t)(int64_t)idle_rc);
+    uart_puts(" clk_rc=");
+    uart_put_hex((uint64_t)(int64_t)clk_rc);
+    uart_puts("\n");
+}
+
+#elif RUNNER_SD_BACKEND == RUNNER_SD_BACKEND_K1_SDHCI
+
+static int sd_read_block_words(uint32_t lba, uint32_t *dst_words)
+{
+    return k1_sdhci_read_block_words(lba, dst_words);
+}
+
+static int sd_write_block_words(uint32_t lba, const uint32_t *src_words)
+{
+    return k1_sdhci_write_block_words(lba, src_words);
+}
+
+static int sd_get_capacity_blocks(uint32_t *blocks_out)
+{
+    return k1_sdhci_get_capacity_blocks(blocks_out);
+}
+
+static int sd_card_init_minimal(void)
+{
+    return k1_sdhci_card_init();
+}
+
+static int sd_card_attach_from_spl(void)
+{
+    return k1_sdhci_attach_from_spl();
+}
+
+static void sd_backend_reset_state(uintptr_t base)
+{
+    g_sdio_base = base;
+    g_sd_total_blocks = 0;
+    k1_sdhci_reset_state(base);
+}
+
+static void sd_backend_quiesce(void)
+{
+    k1_sdhci_quiesce();
+}
+
+#else
+#error "Unsupported RUNNER_SD_BACKEND"
+#endif
+
 static uint32_t footer_encode_progress(uint32_t next_index, uint32_t inflight_index_or_none,
                                        uint32_t retry_count)
 {
@@ -542,26 +622,7 @@ int persist_footer_progress(uint32_t next_index, uint32_t inflight_index_or_none
 
 void sd_quiesce_for_reset(void)
 {
-    int busy_rc;
-    int idle_rc;
-    int clk_rc;
-
-    if (g_sdio_base == 0) return;
-
-    busy_rc = dw_wait_not_busy();
-    idle_rc = sd_send_cmd(MMC_CMD_GO_IDLE_STATE, 0, MMC_RSP_NONE, 0);
-    clk_rc = dw_update_clock(0);
-    dw_writel(DWMCI_INTMASK, 0);
-    dw_writel(DWMCI_RINTSTS, DWMCI_INTMSK_ALL);
-    dw_writel(DWMCI_PWREN, 0);
-
-    uart_puts("[SD] quiesce busy_rc=");
-    uart_put_hex((uint64_t)(int64_t)busy_rc);
-    uart_puts(" idle_rc=");
-    uart_put_hex((uint64_t)(int64_t)idle_rc);
-    uart_puts(" clk_rc=");
-    uart_put_hex((uint64_t)(int64_t)clk_rc);
-    uart_puts("\n");
+    sd_backend_quiesce();
 }
 
 int load_pack_from_sd_tail(void)
@@ -570,11 +631,31 @@ int load_pack_from_sd_tail(void)
     uint32_t footer_next_index = 0;
     uint32_t footer_inflight_index = FOOTER_IDX_NONE;
     uint32_t footer_retry_count = 0u;
-    g_sdio_base = SDIO1_BASE;
+
+    {
+        extern uint8_t __text_start[];
+        extern uint8_t __stack_top[];
+        uint64_t fw_load_addr = (uint64_t)(uintptr_t)__text_start;
+        uint64_t candidate_addr = (uint64_t)(uintptr_t)__stack_top + 0x100000ULL;
+        volatile uint32_t *p1 = (volatile uint32_t *)(uintptr_t)EXT_PACK_ADDR;
+        volatile uint32_t *p2 = (volatile uint32_t *)(uintptr_t)candidate_addr;
+
+        uart_puts("[DBG] FW_LOAD_ADDR="); uart_put_hex(fw_load_addr);
+        uart_puts(" EXT_PACK_ADDR="); uart_put_hex(EXT_PACK_ADDR);
+        uart_puts(" candidate="); uart_put_hex(candidate_addr);
+        uart_puts("\n");
+
+        *p1 = 0xdeadbeefu;
+        uart_puts("[DBG] poke EXT_PACK_ADDR readback="); uart_put_hex(*p1);
+        uart_puts(" (expect deadbeef)\n");
+
+        *p2 = 0xcafef00du;
+        uart_puts("[DBG] poke candidate readback="); uart_put_hex(*p2);
+        uart_puts(" (expect cafef00d)\n");
+    }
+
+    sd_backend_reset_state(SDIO1_BASE);
     uart_puts("[SD] probing base="); uart_put_hex((uint64_t)g_sdio_base); uart_puts("\n");
-    g_sd_rca = 0;
-    g_sd_high_capacity = 0;
-    g_sd_total_blocks = 0;
     g_ext_pack_loaded = 0;
     g_ext_active_index = FOOTER_IDX_NONE;
     g_ext_progress_persisted = 0u;
@@ -667,6 +748,18 @@ int load_pack_from_sd_tail(void)
 
     uart_puts("[SD] table_count="); uart_put_dec_u64(g_ext_pack_count); uart_puts("\n");
 
+    {
+        uint32_t *ext_words = (uint32_t *)(uintptr_t)EXT_PACK_ADDR;
+        int dbg_sd_rc;
+        memset_local(ext_words, 0xaa, SD_BLOCK_SIZE);
+        dbg_sd_rc = sd_read_block_words((uint32_t)g_ext_pack_start_lba, ext_words);
+        uart_puts("[DBG] sentinel-fill+SD-read EXT_PACK_ADDR lba="); uart_put_hex(g_ext_pack_start_lba);
+        uart_puts(" rc="); uart_put_hex((uint64_t)(int64_t)dbg_sd_rc);
+        uart_puts(" first_word="); uart_put_hex(ext_words[0]);
+        uart_puts(" (expect_magic="); uart_put_hex(PACK_MAGIC);
+        uart_puts(", still_sentinel_if=aaaaaaaa)\n");
+    }
+
     if (g_ext_inflight_index != FOOTER_IDX_NONE && g_ext_inflight_index < g_ext_pack_count) {
         if (g_ext_recovery_retry_count >= FOOTER_MAX_TEST_RETRIES) {
             int prc;
@@ -734,6 +827,15 @@ int run_pack_external(uint64_t *total, uint64_t *pass, uint64_t *fail)
             uart_puts(" retry_count="); uart_put_dec_u64(attempt_count);
             uart_puts(" rc="); uart_put_hex((uint64_t)(int64_t)prc); uart_puts("\n");
 
+            {
+                uint32_t dbg_reread_scratch[SD_BLOCK_SIZE / sizeof(uint32_t)];
+                int dbg_rc = sd_read_block_words((uint32_t)g_ext_pack_start_lba, dbg_reread_scratch);
+                uart_puts("[DBG] re-read header lba="); uart_put_hex(g_ext_pack_start_lba);
+                uart_puts(" rc="); uart_put_hex((uint64_t)(int64_t)dbg_rc);
+                uart_puts(" first_word="); uart_put_hex(dbg_reread_scratch[0]);
+                uart_puts(" (expect_magic="); uart_put_hex(PACK_MAGIC); uart_puts(")\n");
+            }
+
             if (e->offset > pack_size || e->size > pack_size || (e->offset + e->size) > pack_size || (e->offset + e->size) < e->offset) {
                 uart_puts("[CASE] RESULT name="); uart_puts(name);
                 uart_puts(" status=ERROR reason=bad_external_range\n");
@@ -789,6 +891,22 @@ int run_pack_external(uint64_t *total, uint64_t *pass, uint64_t *fail)
                         uart_puts(" clear_in_progress rc="); uart_put_hex((uint64_t)(int64_t)prc); uart_puts("\n");
                     }
                     continue;
+                }
+
+                {
+                    const uint8_t *dbg_blob = (const uint8_t *)(uintptr_t)(EXT_PACK_ADDR + first_block_off);
+                    uart_puts("[DBG] entry offset="); uart_put_hex(e->offset);
+                    uart_puts(" size="); uart_put_hex(e->size);
+                    uart_puts(" first_block="); uart_put_hex((uint64_t)first_block);
+                    uart_puts(" first_block_off="); uart_put_hex((uint64_t)first_block_off);
+                    uart_puts(" num_blocks="); uart_put_hex((uint64_t)num_blocks);
+                    uart_puts("\n[DBG] blob bytes=");
+                    for (int db = 0; db < 64; db++) {
+                        uint8_t byte = dbg_blob[db];
+                        uart_putc("0123456789abcdef"[(byte >> 4) & 0xf]);
+                        uart_putc("0123456789abcdef"[byte & 0xf]);
+                    }
+                    uart_puts("\n");
                 }
 
                 (void)run_one_blob(name, (const uint8_t *)(uintptr_t)(EXT_PACK_ADDR + first_block_off), (size_t)e->size, &tr);
