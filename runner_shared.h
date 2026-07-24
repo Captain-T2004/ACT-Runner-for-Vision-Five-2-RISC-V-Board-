@@ -252,6 +252,9 @@ extern uint8_t __stack_bottom[];
 extern uint8_t __stack_top[];
 extern uint8_t __bss_end[];
 extern volatile uint64_t g_boot_sync;
+extern uint64_t g_boot_arg_a0;
+extern uint64_t g_boot_arg_a1;
+void dump_fdt_memory_info(void);
 
 typedef struct RunnerLoadSegment {
     uint64_t start;
@@ -616,6 +619,7 @@ int is_valid_ddr_range(uint64_t begin, uint64_t end);
 
 void *memcpy_local(void *dst, const void *src, size_t n);
 void *memset_local(void *dst, int c, size_t n);
+void *memmove_local(void *dst, const void *src, size_t n);
 void *memcpy(void *dst, const void *src, size_t n);
 void *memset(void *dst, int c, size_t n);
 

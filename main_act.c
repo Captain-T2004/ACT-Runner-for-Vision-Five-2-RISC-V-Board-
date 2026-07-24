@@ -44,6 +44,8 @@ void main(void)
         while (1) { wfi(); }
     }
 
+    dump_fdt_memory_info();
+
     write_csr_mtvec((uint64_t)(uintptr_t)trap_entry);
     write_csr_mscratch((uint64_t)(uintptr_t)(g_trap_stack + sizeof(g_trap_stack)));
     *msip_ptr(RUNNER_HART_ID) = 0;

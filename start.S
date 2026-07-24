@@ -16,9 +16,22 @@
 g_boot_sync:
     .dword 0
 
+.globl g_boot_arg_a0
+.globl g_boot_arg_a1
+g_boot_arg_a0:
+    .dword 0
+g_boot_arg_a1:
+    .dword 0
+
 .section .text
 
 _start:
+    /* ---- Preserve FSBL boot args (a0=hartid, a1=fdt addr) before any clobber ---- */
+    la   t4, g_boot_arg_a0
+    sd   a0, 0(t4)
+    la   t4, g_boot_arg_a1
+    sd   a1, 0(t4)
+
     /* ---- Use hart1 as runner, hart2 as monitor; park others ---- */
     csrr t0, mhartid
     li   t1, BOARD_RUNNER_HART_ID

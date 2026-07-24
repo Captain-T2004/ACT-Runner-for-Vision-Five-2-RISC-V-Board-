@@ -46,6 +46,19 @@ void *memset_local(void *dst, int c, size_t n)
     return dst;
 }
 
+void *memmove_local(void *dst, const void *src, size_t n)
+{
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+    if (d == s || n == 0) return dst;
+    if (d < s) {
+        for (size_t i = 0; i < n; i++) d[i] = s[i];
+    } else {
+        for (size_t i = n; i > 0; i--) d[i - 1] = s[i - 1];
+    }
+    return dst;
+}
+
 void *memcpy(void *dst, const void *src, size_t n) { return memcpy_local(dst, src, n); }
 void *memset(void *dst, int c, size_t n) { return memset_local(dst, c, n); }
 
@@ -644,6 +657,128 @@ int streq(const char* a, const char* b)
     return (*a == 0 && *b == 0);
 }
 
+static int strneq(const char *a, const char *b, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++) {
+        if (a[i] != b[i]) return 0;
+    }
+    return 1;
+}
+
+static uint32_t fdt_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+static uint32_t fdt_align4(uint32_t v) { return (v + 3u) & ~3u; }
+
+void dump_fdt_memory_info(void)
+{
+    uart_puts("[FDT] a0(hartid_arg)=0x"); uart_put_hex(g_boot_arg_a0);
+    uart_puts(" a1(fdt_ptr)=0x"); uart_put_hex(g_boot_arg_a1); uart_puts("\n");
+
+    if (g_boot_arg_a1 == 0 || (g_boot_arg_a1 & 0x3ULL) != 0) {
+        uart_puts("[FDT] a1 not a plausible pointer, skipping\n");
+        return;
+    }
+
+    const uint8_t *fdt = (const uint8_t *)(uintptr_t)g_boot_arg_a1;
+    uint32_t magic = fdt_be32(fdt + 0);
+    uart_puts("[FDT] magic=0x"); uart_put_hex(magic); uart_puts("\n");
+    if (magic != 0xd00dfeedu) {
+        uart_puts("[FDT] no valid FDT blob at a1\n");
+        return;
+    }
+
+    uint32_t totalsize      = fdt_be32(fdt + 4);
+    uint32_t off_dt_struct  = fdt_be32(fdt + 8);
+    uint32_t off_dt_strings = fdt_be32(fdt + 12);
+    uint32_t off_mem_rsvmap = fdt_be32(fdt + 16);
+
+    uart_puts("[FDT] totalsize=0x"); uart_put_hex(totalsize);
+    uart_puts(" off_dt_struct=0x"); uart_put_hex(off_dt_struct);
+    uart_puts(" off_dt_strings=0x"); uart_put_hex(off_dt_strings);
+    uart_puts(" off_mem_rsvmap=0x"); uart_put_hex(off_mem_rsvmap);
+    uart_puts("\n");
+
+    {
+        const uint8_t *rsv = fdt + off_mem_rsvmap;
+        for (int i = 0; i < 16; i++) {
+            uint64_t addr = ((uint64_t)fdt_be32(rsv) << 32) | fdt_be32(rsv + 4);
+            uint64_t size = ((uint64_t)fdt_be32(rsv + 8) << 32) | fdt_be32(rsv + 12);
+            if (addr == 0 && size == 0) break;
+            uart_puts("[FDT] rsvmap addr=0x"); uart_put_hex(addr);
+            uart_puts(" size=0x"); uart_put_hex(size); uart_puts("\n");
+            rsv += 16;
+        }
+    }
+
+    const uint8_t *p = fdt + off_dt_struct;
+    const uint8_t *strings = fdt + off_dt_strings;
+    int depth = 0;
+    int interesting_depth = -1;
+    int interesting_kind = 0; /* 1=memory node, 2=reserved-memory region */
+
+    for (int guard = 0; guard < 200000; guard++) {
+        if ((uint32_t)(p - fdt) >= totalsize) break;
+        uint32_t tok = fdt_be32(p); p += 4;
+
+        if (tok == 1u) { /* FDT_BEGIN_NODE */
+            const char *name = (const char *)p;
+            uint32_t namelen = 0;
+            while (name[namelen] != 0) namelen++;
+            p += fdt_align4(namelen + 1);
+            depth++;
+
+            int is_mem = (namelen >= 6 && strneq(name, "memory", 6) &&
+                          (namelen == 6 || name[6] == '@'));
+            int is_rsvmem = (namelen >= 15 && strneq(name, "reserved-memory", 15));
+            int is_child_of_rsvmem = (interesting_kind == 2 && interesting_depth != -1 &&
+                                       depth == interesting_depth + 1);
+
+            if (is_mem || is_rsvmem || is_child_of_rsvmem) {
+                uart_puts("[FDT] node '");
+                for (uint32_t i = 0; i < namelen; i++) uart_putc(name[i]);
+                uart_puts("'\n");
+                if (is_mem) { interesting_depth = depth; interesting_kind = 1; }
+                else if (is_rsvmem) { interesting_depth = depth; interesting_kind = 2; }
+                /* child of reserved-memory: keep interesting_depth at the
+                   reserved-memory container's depth so its own END_NODE
+                   clears it, but still report this child's own reg below */
+            }
+        } else if (tok == 2u) { /* FDT_END_NODE */
+            if (depth == interesting_depth) { interesting_depth = -1; interesting_kind = 0; }
+            depth--;
+        } else if (tok == 3u) { /* FDT_PROP */
+            uint32_t len = fdt_be32(p); p += 4;
+            uint32_t nameoff = fdt_be32(p); p += 4;
+            const char *pname = (const char *)(strings + nameoff);
+
+            int in_memory_node = (interesting_kind == 1 && depth == interesting_depth);
+            int in_rsvmem_region = (interesting_kind == 2 && depth == interesting_depth + 1);
+
+            if ((in_memory_node || in_rsvmem_region) && streq(pname, "reg")) {
+                uart_puts(in_memory_node ? "[FDT]   memory reg len=0x" : "[FDT]   reserved-region reg len=0x");
+                uart_put_hex(len); uart_puts(" bytes=");
+                for (uint32_t i = 0; i < len && i < 64; i += 4) {
+                    uart_put_hex(fdt_be32(p + i));
+                    uart_puts(" ");
+                }
+                uart_puts("\n");
+            }
+            p += fdt_align4(len);
+        } else if (tok == 4u) { /* FDT_NOP */
+            continue;
+        } else if (tok == 9u) { /* FDT_END */
+            break;
+        } else {
+            uart_puts("[FDT] unknown token=0x"); uart_put_hex(tok); uart_puts(", aborting walk\n");
+            break;
+        }
+    }
+}
+
 static int find_symbol_by_name(const uint8_t *blob, size_t blob_size, const Elf64_Ehdr *eh,
                                const char *target, uint64_t *value_out)
 {
@@ -1192,20 +1327,42 @@ int load_elf_blob(const uint8_t *blob, size_t blob_size, uint64_t *entry_out)
     g_runner_image.loaded_region_end = 0;
     g_runner_image.load_segment_count = 0;
     g_runner_image.riescue_hart_context_addr = 0;
+
+    dbg_puts("[DBG] load_elf_blob: pre find_symbol tohost\n");
     if (find_symbol_by_name(blob, blob_size, eh, "tohost", (uint64_t *)&g_runner_image.tohost_addr) != 0) {
         g_runner_image.tohost_addr = FIXED_TOHOST_ADDR;
     }
+    dbg_puts("[DBG] load_elf_blob: post find_symbol tohost tohost_addr=0x"); dbg_hex_u64(g_runner_image.tohost_addr); dbg_nl();
+
 #if RUNNER_PAYLOAD_KIND == PAYLOAD_KIND_RIESCUE
     if (find_symbol_by_name(blob, blob_size, eh, "hart_context_pa", (uint64_t *)&g_runner_image.riescue_hart_context_addr) != 0 &&
         find_symbol_by_name(blob, blob_size, eh, "__section_hart_context", (uint64_t *)&g_runner_image.riescue_hart_context_addr) != 0) {
         (void)find_symbol_by_name(blob, blob_size, eh, "hart_context", (uint64_t *)&g_runner_image.riescue_hart_context_addr);
     }
 #endif
+
+    dbg_puts("[DBG] load_elf_blob: pre find_signature_range\n");
     find_signature_range(blob, blob_size, eh, (uint64_t *)&g_runner_image.sig_begin, (uint64_t *)&g_runner_image.sig_end);
+    dbg_puts("[DBG] load_elf_blob: post find_signature_range sig_begin=0x"); dbg_hex_u64(g_runner_image.sig_begin);
+    dbg_puts(" sig_end=0x"); dbg_hex_u64(g_runner_image.sig_end); dbg_nl();
+
+    dbg_puts("[DBG] load_elf_blob: pre find_failure_scratch_range\n");
     find_failure_scratch_range(blob, blob_size, eh, (uint64_t *)&g_runner_image.fail_begin, (uint64_t *)&g_runner_image.fail_end);
+    dbg_puts("[DBG] load_elf_blob: post find_failure_scratch_range fail_begin=0x"); dbg_hex_u64(g_runner_image.fail_begin);
+    dbg_puts(" fail_end=0x"); dbg_hex_u64(g_runner_image.fail_end); dbg_nl();
+
+    dbg_puts("[DBG] load_elf_blob: pre PT_LOAD loop phnum="); dbg_hex_u64(eh->e_phnum); dbg_nl();
 
     const Elf64_Phdr *ph = (const Elf64_Phdr *)(const void *)(blob + eh->e_phoff);
     for (uint16_t i = 0; i < eh->e_phnum; i++) {
+        dbg_puts("[DBG] load_elf_blob: segment i="); dbg_hex_u64(i);
+        dbg_puts(" p_type=0x"); dbg_hex_u64(ph[i].p_type);
+        dbg_puts(" p_offset=0x"); dbg_hex_u64(ph[i].p_offset);
+        dbg_puts(" p_filesz=0x"); dbg_hex_u64(ph[i].p_filesz);
+        dbg_puts(" p_memsz=0x"); dbg_hex_u64(ph[i].p_memsz);
+        dbg_puts(" p_paddr=0x"); dbg_hex_u64(ph[i].p_paddr);
+        dbg_puts(" p_vaddr=0x"); dbg_hex_u64(ph[i].p_vaddr); dbg_nl();
+
         if (ph[i].p_type != PT_LOAD) continue;
         if (ph[i].p_filesz == 0 && ph[i].p_memsz == 0) continue;
 
@@ -1233,11 +1390,27 @@ int load_elf_blob(const uint8_t *blob, size_t blob_size, uint64_t *entry_out)
         void *dst = (void *)(uintptr_t)dst_addr;
         const void *src = (const void *)(blob + ph[i].p_offset);
 
-        memcpy_local(dst, src, (size_t)ph[i].p_filesz);
+        {
+            uint64_t src_addr = (uint64_t)(uintptr_t)src;
+            uint64_t filesz = (uint64_t)ph[i].p_filesz;
+            int overlaps = (filesz > 0) && (dst_addr < src_addr + filesz) && (src_addr < dst_addr + filesz);
+            dbg_puts("[DBG] load_elf_blob: pre copy dst=0x"); dbg_hex_u64(dst_addr);
+            dbg_puts(" src=0x"); dbg_hex_u64(src_addr);
+            dbg_puts(" filesz=0x"); dbg_hex_u64(filesz);
+            dbg_puts(" overlap="); dbg_hex_u64((uint64_t)overlaps);
+            if (overlaps) {
+                dbg_puts(" unsafe_fwd_dir="); dbg_hex_u64((uint64_t)(dst_addr > src_addr));
+            }
+            dbg_nl();
+        }
+        memmove_local(dst, src, (size_t)ph[i].p_filesz);
         if (ph[i].p_memsz > ph[i].p_filesz) {
             memset_local((uint8_t *)dst + ph[i].p_filesz, 0, (size_t)(ph[i].p_memsz - ph[i].p_filesz));
         }
+        dbg_puts("[DBG] load_elf_blob: post segment copy i="); dbg_hex_u64(i); dbg_nl();
     }
+
+    dbg_puts("[DBG] load_elf_blob: post PT_LOAD loop\n");
 
     if (g_runner_image.tohost_addr && is_valid_ddr_addr(g_runner_image.tohost_addr)) {
         g_runner_image.tohost_ptr = (volatile uint64_t *)(uintptr_t)g_runner_image.tohost_addr;
@@ -1245,7 +1418,9 @@ int load_elf_blob(const uint8_t *blob, size_t blob_size, uint64_t *entry_out)
         g_runner_image.tohost_ptr = 0;
     }
 
+    dbg_puts("[DBG] load_elf_blob: pre sync_icache\n");
     sync_icache();
+    dbg_puts("[DBG] load_elf_blob: post sync_icache, returning 0\n");
     *entry_out = eh->e_entry;
 
     asm volatile ("fence rw, rw" ::: "memory");
